@@ -85,10 +85,24 @@ CACHE_TTL = 3600  # 1 soat
 # ╔════════════════ FAST AUDIO DOWNLOAD CONFIG ════════════════╗
 # tezroq download uchun optimizatsiya
 AUDIO_OPTIONS = {
-    'format': 'bestaudio/best',
+
+    # eng tez audio formatlar
+    'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio',
+
     'quiet': True,
     'noplaylist': True,
     'geo_bypass': True,
+
+    # retry optimizatsiya
+    'retries': 3,
+    'fragment_retries': 3,
+
+    # SSL skip speed boost
+    'nocheckcertificate': True,
+
+    # parallel fragment download
+    'concurrent_fragment_downloads': 5,
+
     'ignoreerrors': True,
 }
 # ╚═════════════════════════════════════════════════════════════╝
@@ -1190,6 +1204,7 @@ async def download_audio(url: str) -> tuple[Optional[Path], Optional[MediaInfo]]
 
     # ╔════════ GENERATE FILE ID ════════╗
     file_id = generate_id()
+
     output_template = str(TEMP_DIR / f"{file_id}.%(ext)s")
     # ╚══════════════════════════════════╝
 
@@ -1202,12 +1217,14 @@ async def download_audio(url: str) -> tuple[Optional[Path], Optional[MediaInfo]]
     # ╔════════ PLATFORM BASED CONFIG ════════╗
     if platform == "instagram":
 
+        # Instagram uchun avval video yuklab, keyin audio extract qilamiz
         video_path = await download_instagram_fast(url)
 
         if not video_path:
             return None, None
 
         audio_path = await extract_audio_from_video(video_path)
+
         await cleanup_file(video_path)
 
         if not audio_path:
@@ -1222,30 +1239,49 @@ async def download_audio(url: str) -> tuple[Optional[Path], Optional[MediaInfo]]
         )
 
         return audio_path, media_info
-    # ╚════════════════════════════════════╝
 
 
-    # ╔════════ YT-DLP CONFIG (NO FFMPEG) ════════╗
+    # YouTube / TikTok uchun yt-dlp ishlatamiz
     opts = AUDIO_OPTIONS.copy()
+
     opts["outtmpl"] = output_template
-    # ╚═══════════════════════════════════════════╝
+    opts["postprocessors"] = [{
+    "key": "FFmpegExtractAudio",
+    "preferredcodec": "mp3",
+    "preferredquality": "320",
+    }]
+    # ╚════════════════════════════════════╝
 
 
     # ╔════════ THREAD POOL DOWNLOAD ════════╗
     def _download():
+
         try:
+
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+
+                info = ydl.extract_info(
+                    url,
+                    download=True
+                )
+
                 return info
+
         except Exception as e:
+
             logger.error(f"Audio yuklash xatosi: {e}")
+
             return None
     # ╚══════════════════════════════════════╝
 
 
     # ╔════════ RUN IN THREAD POOL ════════╗
     loop = asyncio.get_running_loop()
-    info = await loop.run_in_executor(EXECUTOR, _download)
+
+    info = await loop.run_in_executor(
+        EXECUTOR,
+        _download
+    )
     # ╚════════════════════════════════════╝
 
 
@@ -1253,29 +1289,65 @@ async def download_audio(url: str) -> tuple[Optional[Path], Optional[MediaInfo]]
         return None, None
 
 
-    # ╔════════ AUTO FILE DETECTION (ANY EXT) ════════╗
+    # ╔════════ FAST FILE DETECTION ════════╗
+    possible_ext = ["mp3"]
+
     found_path = None
 
-    for file in TEMP_DIR.glob(f"{file_id}.*"):
-        found_path = file
-        break
-    # ╚═══════════════════════════════════════════════╝
+    for ext in possible_ext:
+
+        path = TEMP_DIR / f"{file_id}.{ext}"
+
+        if path.exists():
+
+            found_path = path
+
+            break
+    # ╚════════════════════════════════════╝
 
 
-    if not found_path or not found_path.exists():
+    if not found_path:
         return None, None
+
+
+    # ╔════════ CONVERT ONLY IF NEEDED ════════╗
+    if found_path.suffix != ".mp3":
+
+        converted = await convert_to_mp3(found_path)
+
+        if not converted:
+            return None, None
+
+        await cleanup_file(found_path)
+
+        found_path = converted
+    # ╚══════════════════════════════════════╝
 
 
     # ╔════════ BUILD MEDIA INFO ════════╗
     media_info = MediaInfo(
-        title=info.get("title", "Audio")[:100],
+
+        title=info.get(
+            "title",
+            "Audio"
+        )[:100],
+
         artist=info.get(
             "uploader",
-            info.get("channel", "Noma'lum")
+            info.get(
+                "channel",
+                "Noma'lum"
+            )
         )[:50],
-        duration=int(info.get("duration") or 0),
+
+        duration=int(
+            info.get("duration") or 0
+        ),
+
         thumbnail=info.get("thumbnail"),
+
         url=url,
+
         platform=platform
     )
     # ╚══════════════════════════════════╝
@@ -2728,9 +2800,7 @@ async def callback_download(callback: CallbackQuery):
 
         # ╔════════ SEND TO USER (INSTANT) ════════╗
         await callback.message.answer_audio(
-            audio=file_id,
-            title=info.title,
-            performer=info.artist
+            audio=file_id
         )
         # ╚═══════════════════════════════════════╝
 
